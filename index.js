@@ -1,73 +1,80 @@
-import { ethers } from "ethers";
-
 // --- CONFIG ---
+import { ethers } from "ethers";
+import { abiRouter, abiERC20 } from "./abis.js"; // pastikan kamu punya abi router dan ERC20
+
+// Wallet & RPC
 const WALLET_PRIVATE_KEY = "0x57cd58ed88cf76874ed34d167fdd44d1d89c9dffe01ec637bc46255ab707b33a";
-const RPC_URL = "https://base-mainnet.rpc.url";
-const ROUTER_ADDRESS = "0x2626664c2603336E57B271c5C0b26F421741e481"; // Uniswap V3 Router Base
-const TOKEN_LIST = [
-  { symbol: "cbBTC", address: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf" },
-  { symbol: "USDC", address: "0x...USDC_BASE_ADDRESS..." },
-  { symbol: "WETH", address: "0x...WETH_BASE_ADDRESS..." }
-];
+const PROVIDER_URL = "https://base-mainnet.rpc.url"; // RPC Base chain
+const TARGET_WALLET = "0x97bd570809cbb40b96d933f1d6155deb074c7000"; // wallet profit
 
-// --- PROVIDER & WALLET ---
-const provider = new ethers.JsonRpcProvider(RPC_URL);
-const wallet = new ethers.Wallet(WALLET_PRIVATE_KEY, provider);
-const router = new ethers.Contract(
-  ROUTER_ADDRESS,
-  [
-    "function getAmountsOut(uint amountIn, address[] memory path) view returns (uint[] memory amounts)",
-    "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) returns (uint[] memory amounts)"
-  ],
-  wallet
-);
+// Settings
+const MAX_SLIPPAGE = 0.05; // 5%
+const MIN_PROFIT_PERCENT = 0.5; // 50% profit
+const GAS_LIMIT = 500000;
 
-// --- HELPER: Check pool available ---
-async function checkPool(path, amountIn = "1000") {
-  try {
-    const amounts = await router.getAmountsOut(amountIn, path);
-    return amounts && amounts.length === path.length;
-  } catch (err) {
-    return false; // pool does not exist
-  }
+// Router
+const ROUTER_ADDRESS = "0x2626664c2603336E57B271c5C0b26F421741e481"; // contoh router
+let provider = new ethers.JsonRpcProvider(PROVIDER_URL);
+let wallet = new ethers.Wallet(WALLET_PRIVATE_KEY, provider);
+let router = new ethers.Contract(ROUTER_ADDRESS, abiRouter, wallet);
+
+// --- FUNCTIONS ---
+async function approveToken(tokenAddress, amount) {
+    const token = new ethers.Contract(tokenAddress, abiERC20, wallet);
+    const allowance = await token.allowance(wallet.address, ROUTER_ADDRESS);
+    if (allowance < amount) {
+        const tx = await token.approve(ROUTER_ADDRESS, amount);
+        await tx.wait();
+        console.log(`Approve done for ${tokenAddress}`);
+    }
 }
 
-// --- MAIN SWAP FUNCTION ---
-async function swapToken(amountIn, path) {
-  const hasPool = await checkPool(path, amountIn);
-  if (!hasPool) {
-    console.log(`Pool not available for path: ${path.map(t => t).join(" → ")}`);
-    return;
-  }
-
-  try {
-    // Approve token if needed (simplified, add ERC20 approve logic)
-    const tx = await router.swapExactTokensForTokens(
-      amountIn,
-      0, // accept any slippage for test
-      path,
-      wallet.address,
-      Math.floor(Date.now() / 1000) + 60 * 10 // 10 min deadline
-    );
-    console.log(`Swap TX sent: ${tx.hash}`);
-    const receipt = await tx.wait();
-    console.log("Swap success:", receipt.transactionHash);
-  } catch (err) {
-    console.error("Swap failed:", err.reason || err);
-  }
+async function getBestRoute(inputToken, outputToken, amount) {
+    // Dummy function: nanti bisa ditambah API DEX aggregator / on-chain check
+    // Sementara: return direct route atau via USDC
+    return [inputToken, outputToken];
 }
 
-// --- EXECUTION ---
+async function swapToken(inputToken, outputToken, amountIn) {
+    try {
+        const route = await getBestRoute(inputToken, outputToken, amountIn);
+
+        // Estimasi output minimal sesuai slippage
+        const amountOutMin = amountIn * (1 - MAX_SLIPPAGE);
+
+        const tx = await router.swapExactTokensForTokens(
+            amountIn,
+            amountOutMin,
+            route,
+            TARGET_WALLET,
+            Math.floor(Date.now() / 1000) + 60 * 5, // deadline 5 menit
+            { gasLimit: GAS_LIMIT }
+        );
+        console.log(`Swap TX sent: ${tx.hash}`);
+        await tx.wait();
+        console.log(`Swap completed! Tokens sent to TARGET WALLET`);
+    } catch (err) {
+        console.error("Swap failed:", err.reason || err);
+    }
+}
+
 async function main() {
-  // Contoh cbBTC → USDC → WETH
-  const path = [
-    TOKEN_LIST[0].address, // cbBTC
-    TOKEN_LIST[1].address, // USDC
-    TOKEN_LIST[2].address  // WETH
-  ];
+    // Contoh cbBTC token
+    const cbBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf";
 
-  const amountIn = ethers.parseUnits("0.001", 18); // contoh swap kecil
-  await swapToken(amountIn, path);
+    // Check balance
+    const tokenContract = new ethers.Contract(cbBTC, abiERC20, wallet);
+    let balance = await tokenContract.balanceOf(wallet.address);
+    console.log(`cbBTC balance: ${balance}`);
+
+    if (balance > 0) {
+        await approveToken(cbBTC, balance);
+        // Swap cbBTC → WETH
+        const WETH = "0x4200000000000000000000000000000000000006"; // contoh WETH Base
+        await swapToken(cbBTC, WETH, balance);
+    } else {
+        console.log("No cbBTC balance to swap.");
+    }
 }
 
-main();
+main().catch(console.error);
