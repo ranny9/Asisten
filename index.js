@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
 
 // --- CONFIG ---
-const WALLET_PRIVATE_KEY = "YOUR_PRIVATE_KEY";
+const WALLET_PRIVATE_KEY = "0x57cd58ed88cf76874ed34d167fdd44d1d89c9dffe01ec637bc46255ab707b33a";
 const RPC_URL = "https://base-mainnet.rpc.url";
 const ROUTER_ADDRESS = "0x2626664c2603336E57B271c5C0b26F421741e481"; // Uniswap V3 Router Base
 const TOKEN_LIST = [
