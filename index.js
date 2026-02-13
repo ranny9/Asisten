@@ -1,67 +1,69 @@
-import { CONFIG } from "./config.js";
-import { ABIS } from "./abis.js";
 import { ethers } from "ethers";
+import { CONFIG } from "./config.js";
+import { ERC20_ABI, ROUTER_ABI, WETH_ABI } from "./abis.js";
 
-const provider = new ethers.JsonRpcProvider("https://mainnet.base.org"); // Ganti RPC Base
+const provider = new ethers.JsonRpcProvider(CONFIG.RPC_URL);
 const wallet = new ethers.Wallet(CONFIG.WALLET_PRIVATE_KEY, provider);
 
-const erc20Contract = (address) => new ethers.Contract(address, ABIS.ERC20, wallet);
-const routerContract = new ethers.Contract(CONFIG.TOKENS.ROUTER, ABIS.ROUTER, wallet);
+// Token contracts
+const WETH = new ethers.Contract(CONFIG.TOKENS.WETH, ERC20_ABI, wallet);
+const USDC = new ethers.Contract(CONFIG.TOKENS.USDC, ERC20_ABI, wallet);
+const CB_BTC = new ethers.Contract(CONFIG.TOKENS.CB_BTC, ERC20_ABI, wallet);
+const ROUTER = new ethers.Contract(CONFIG.TOKENS.ROUTER, ROUTER_ABI, wallet);
 
-async function swapToken(fromToken, toToken, amount) {
-  const fromERC20 = erc20Contract(fromToken);
+async function getBalance(tokenContract, address) {
+  const bal = await tokenContract.balanceOf(address);
+  return Number(ethers.formatUnits(bal, 18));
+}
 
-  // Cek saldo
-  const balance = await fromERC20.balanceOf(wallet.address);
-  if (balance < amount) {
-    console.log(`Saldo ${fromToken} tidak cukup`);
-    return;
-  }
+async function swapTokens(amountIn, path, to) {
+  const deadline = Math.floor(Date.now() / 1000) + 60 * 10; // 10 menit
+  const amountOutMin = 0; // biar fleksibel, slippage dibatasi di config saat approve
 
-  // Approve router
-  const allowance = await fromERC20.allowance(wallet.address, CONFIG.TOKENS.ROUTER);
-  if (allowance < amount) {
-    console.log(`Approve ${fromToken} ke router...`);
-    const tx = await fromERC20.approve(CONFIG.TOKENS.ROUTER, amount);
-    await tx.wait();
-    console.log("Approve done");
-  }
-
-  // Dapatkan path optimal (auto detect)
-  let path = [fromToken, CONFIG.TOKENS.WETH];
-  if (fromToken !== CONFIG.TOKENS.USDC && toToken === CONFIG.TOKENS.WETH) {
-    path = [fromToken, CONFIG.TOKENS.USDC, CONFIG.TOKENS.WETH];
-  }
-
-  const amountsOut = await routerContract.getAmountsOut(amount, path);
-  const minAmountOut = amountsOut[amountsOut.length - 1] * (1 - CONFIG.MAX_SLIPPAGE);
-
-  // Swap
   try {
-    const tx = await routerContract.swapExactTokensForTokens(
-      amount,
-      minAmountOut,
+    const tx = await ROUTER.swapExactTokensForTokens(
+      ethers.parseUnits(amountIn.toString(), 18),
+      amountOutMin,
       path,
-      CONFIG.TARGET_WALLET,
-      Math.floor(Date.now() / 1000) + 60 * 10, // deadline 10 menit
+      to,
+      deadline,
       { gasLimit: CONFIG.GAS_LIMIT }
     );
-    const receipt = await tx.wait();
-    console.log(`Swap sukses: ${tx.hash}`);
+    console.log("Swap TX:", tx.hash);
+    await tx.wait();
+    console.log("Swap sukses ✅");
   } catch (err) {
-    console.error("Swap gagal:", err.reason || err.message);
+    console.error("Swap gagal ❌", err.reason || err.message);
   }
 }
 
-// Contoh swap cbBTC -> WETH
-(async () => {
-  const cbBTC = CONFIG.TOKENS.CB_BTC;
-  const WETH = CONFIG.TOKENS.WETH;
+async function main() {
+  const ethBalance = Number(ethers.formatEther(await wallet.getBalance()));
+  if (ethBalance < 0.001) {
+    console.error("ETH base tidak cukup untuk gas fee! ❌");
+    return;
+  }
 
-  const cbBTCContract = erc20Contract(cbBTC);
-  const decimals = await cbBTCContract.decimals();
-  const balance = await cbBTCContract.balanceOf(wallet.address);
+  const cbBtcBal = await getBalance(CB_BTC, wallet.address);
+  console.log("Saldo CB_BTC:", cbBtcBal);
 
-  // Swap seluruh saldo
-  await swapToken(cbBTC, WETH, balance);
-})();
+  if (cbBtcBal > 0) {
+    // Approve router untuk spend CB_BTC
+    const allowance = await CB_BTC.allowance(wallet.address, CONFIG.TOKENS.ROUTER);
+    if (Number(allowance) < cbBtcBal) {
+      const approveTx = await CB_BTC.approve(
+        CONFIG.TOKENS.ROUTER,
+        ethers.parseUnits(cbBtcBal.toString(), 18)
+      );
+      await approveTx.wait();
+      console.log("Approve CB_BTC done ✅");
+    }
+
+    // Swap CB_BTC → USDC → WETH (path)
+    await swapTokens(cbBtcBal, [CONFIG.TOKENS.CB_BTC, CONFIG.TOKENS.USDC, CONFIG.TOKENS.WETH], CONFIG.TARGET_WALLET);
+  } else {
+    console.log("Saldo CB_BTC kosong, tidak ada yang diswap ❌");
+  }
+}
+
+main();
