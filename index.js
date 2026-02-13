@@ -24,7 +24,7 @@ const WETH = "0x4200000000000000000000000000000000000006";
 const TARGET_TOKEN = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf";
 
 // fee tier pool (500 = 0.05%, 3000 = 0.3%)
-const POOL_FEE = 3000;
+const POOL_FEE = 500;
 
 // jumlah ETH untuk test buy (sesuaikan, ini ~ $1-an)
 const BUY_AMOUNT_ETH = "0.0005";
