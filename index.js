@@ -4,23 +4,24 @@ const RPC = "https://mainnet.base.org";
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 
 // Token addresses
-const CB_BTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf";
-const USDC   = "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8";
-const WETH   = "0x4200000000000000000000000000000000000006";
+const TOKENS = {
+  CB_BTC: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+  USDC:   "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8",
+  WETH:   "0x4200000000000000000000000000000000000006"
+};
 
 // Router
 const ROUTER = "0x2626664c2603336E57B271c5C0b26F421741e481";
 
 // Bot settings
-const SELL_AMOUNT = ethers.parseUnits("0.00001", 8); // percobaan kecil
 const FEES = [500, 3000, 10000];
-const TARGET_PROFIT_PERCENT = 10; // misal 10% profit untuk auto sell
 
 // ERC20 & Router ABIs
 const erc20Abi = [
   "function approve(address,uint256) returns (bool)",
   "function allowance(address,address) view returns (uint256)",
-  "function balanceOf(address) view returns (uint256)"
+  "function balanceOf(address) view returns (uint256)",
+  "function decimals() view returns (uint8)"
 ];
 const routerAbi = [
   "function exactInput((bytes path,uint256 amountIn,uint256 amountOutMinimum,address recipient,uint256 deadline)) payable returns (uint256 amountOut)",
@@ -58,7 +59,7 @@ async function trySwap(router, wallet, path, fees, amount) {
 
 // Auto wrap ETH → WETH
 async function autoWrap(wallet, router, requiredWETH) {
-  const weth = new ethers.Contract(WETH, erc20Abi, wallet);
+  const weth = new ethers.Contract(TOKENS.WETH, erc20Abi, wallet);
   const bal = await weth.balanceOf(wallet.address);
   if (bal >= requiredWETH) return;
   const need = requiredWETH - bal;
@@ -71,65 +72,65 @@ async function autoWrap(wallet, router, requiredWETH) {
 async function main() {
   const provider = new ethers.JsonRpcProvider(RPC);
   const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-
   console.log("Wallet :", wallet.address);
   console.log("Chain  :", (await provider.getNetwork()).chainId);
 
-  const cbbtc  = new ethers.Contract(CB_BTC, erc20Abi, wallet);
-  const weth   = new ethers.Contract(WETH, erc20Abi, wallet);
   const router = new ethers.Contract(ROUTER, routerAbi, wallet);
 
-  // cek saldo cbBTC
-  const bal = await cbbtc.balanceOf(wallet.address);
-  console.log("cbBTC balance :", bal.toString());
-  if (bal < SELL_AMOUNT) return console.log("Saldo cbBTC tidak cukup");
+  // Dapatkan semua saldo token yang ada
+  for (const [name, addr] of Object.entries(TOKENS)) {
+    const token = new ethers.Contract(addr, erc20Abi, wallet);
+    const balance = await token.balanceOf(wallet.address);
+    const decimals = await token.decimals();
+    console.log(`${name} balance:`, ethers.formatUnits(balance, decimals));
 
-  // approve cbBTC
-  const allowance = await cbbtc.allowance(wallet.address, ROUTER);
-  if (allowance < SELL_AMOUNT) {
-    console.log("Approve cbBTC...");
-    const txA = await cbbtc.approve(ROUTER, ethers.MaxUint256);
-    await txA.wait();
-    console.log("Approve done");
-  }
+    if (balance > 0n && name !== "WETH") {
+      // Auto approve
+      const allowance = await token.allowance(wallet.address, ROUTER);
+      if (allowance < balance) {
+        console.log("Approve", name, "...");
+        const txA = await token.approve(ROUTER, ethers.MaxUint256);
+        await txA.wait();
+        console.log("Approve done");
+      }
 
-  // Auto wrap WETH minimal untuk swap
-  await autoWrap(wallet, router, ethers.parseUnits("0.001", 18));
+      // Auto wrap WETH minimal
+      await autoWrap(wallet, router, ethers.parseUnits("0.001", 18));
 
-  let success = false;
+      let success = false;
 
-  // Coba direct path cbBTC → WETH
-  for (const fee of FEES) {
-    try {
-      const hash = await trySwap(router, wallet, [CB_BTC, WETH], [fee], SELL_AMOUNT);
-      console.log("Swap sukses direct! Hash:", hash);
-      success = true;
-      break;
-    } catch (e) {
-      console.log("Gagal direct fee", fee, e?.shortMessage || e.message);
-    }
-  }
-
-  // Kalau gagal, coba multi-hop cbBTC → USDC → WETH
-  if (!success) {
-    for (const fee1 of FEES) {
-      for (const fee2 of FEES) {
+      // Coba direct swap token → WETH
+      for (const fee of FEES) {
         try {
-          const hash = await trySwap(router, wallet, [CB_BTC, USDC, WETH], [fee1, fee2], SELL_AMOUNT);
-          console.log("Swap sukses multi-hop! Hash:", hash);
+          const hash = await trySwap(router, wallet, [addr, TOKENS.WETH], [fee], balance);
+          console.log("Swap sukses direct!", hash);
           success = true;
           break;
         } catch (e) {
-          console.log(`Gagal multi-hop fees ${fee1}-${fee2}`, e?.shortMessage || e.message);
+          console.log("Gagal direct fee", fee, e?.shortMessage || e.message);
         }
       }
-      if (success) break;
+
+      // Kalau gagal, coba multi-hop token → USDC → WETH
+      if (!success) {
+        for (const fee1 of FEES) {
+          for (const fee2 of FEES) {
+            try {
+              const hash = await trySwap(router, wallet, [addr, TOKENS.USDC, TOKENS.WETH], [fee1, fee2], balance);
+              console.log("Swap sukses multi-hop!", hash);
+              success = true;
+              break;
+            } catch (e) {
+              console.log(`Gagal multi-hop fees ${fee1}-${fee2}`, e?.shortMessage || e.message);
+            }
+          }
+          if (success) break;
+        }
+      }
+
+      if (!success) console.log("Semua kemungkinan gagal untuk token", name);
     }
   }
-
-  if (!success) console.log("Semua kemungkinan gagal. Stop.");
-
-  // TODO: nanti bisa ditambah auto-check profit & auto sell
 }
 
 main().catch(console.error);
