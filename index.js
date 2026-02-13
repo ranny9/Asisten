@@ -1,125 +1,89 @@
 import { ethers } from "ethers";
 
-/* ==============================
-   CONFIG
-============================== */
+/* ================== CONFIG ================== */
 
+// Base RPC
 const RPC = "https://mainnet.base.org";
 
-// ganti dengan private key wallet kamu
+// private key dari .env
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 
-// ====== TOKEN (WAJIB BENAR) ======
-// cbBTC di Base
-const CB_BTC = "PASTE_cbBTC_ADDRESS_HERE";
+// cbBTC (Base)
+const CB_BTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf";
 
-// WETH di Base
-const WETH   = "PASTE_WETH_ADDRESS_HERE";
+// WETH (Base canonical)
+const WETH = "0x4200000000000000000000000000000000000006";
 
 // Uniswap V3 SwapRouter02 (Base)
-const SWAP_ROUTER = "0x2626664c2603336E57B271c5C0b26F4217416481";
+const ROUTER = "0x2626664c2603336E57B271c5C0b26F421741e481";
 
-// fee tier pool (0.05% / 0.3% / 1%)
-// biasanya BTC pair pakai 3000
-const POOL_FEE = 3000;
+// pool fee (cbBTC/WETH biasa 0.3%)
+const FEE = 3000;
 
+// jumlah cbBTC yang mau dijual (TEST kecil)
+const SELL_AMOUNT = ethers.parseUnits("0.000001", 8); // cbBTC = 8 decimals
 
-/* ==============================
-   ABI MINIMAL
-============================== */
+/* ============================================ */
 
-const ERC20_ABI = [
-  "function decimals() view returns(uint8)",
-  "function balanceOf(address) view returns(uint256)",
-  "function approve(address,uint256) returns(bool)",
-  "function allowance(address,address) view returns(uint256)"
+const erc20Abi = [
+  "function approve(address spender,uint256 amount) external returns (bool)",
+  "function allowance(address owner,address spender) external view returns (uint256)",
+  "function balanceOf(address owner) external view returns (uint256)",
+  "function decimals() external view returns (uint8)"
 ];
 
-const SWAP_ROUTER_ABI = [
+const routerAbi = [
   "function exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)"
 ];
 
-
-/* ==============================
-   MAIN
-============================== */
-
 async function main() {
-
   const provider = new ethers.JsonRpcProvider(RPC);
-  const wallet   = new ethers.Wallet(PRIVATE_KEY, provider);
+  const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
   console.log("Wallet :", wallet.address);
   console.log("Chain  :", (await provider.getNetwork()).chainId);
 
-  const cbBTC = new ethers.Contract(CB_BTC, ERC20_ABI, wallet);
-  const weth  = new ethers.Contract(WETH, ERC20_ABI, wallet);
+  const cbbtc = new ethers.Contract(CB_BTC, erc20Abi, wallet);
+  const router = new ethers.Contract(ROUTER, routerAbi, wallet);
 
-  const router = new ethers.Contract(
-    SWAP_ROUTER,
-    SWAP_ROUTER_ABI,
-    wallet
-  );
+  const bal = await cbbtc.balanceOf(wallet.address);
+  console.log("cbBTC balance :", bal.toString());
 
-  const decimals = await cbBTC.decimals();
-  console.log("cbBTC decimals:", decimals.toString());
-
-  const balance = await cbBTC.balanceOf(wallet.address);
-  console.log("cbBTC balance:", ethers.formatUnits(balance, decimals));
-
-  if (balance === 0n) {
-    console.log("No cbBTC balance.");
+  if (bal < SELL_AMOUNT) {
+    console.log("Saldo cbBTC tidak cukup untuk test sell");
     return;
   }
 
-  // =============================
-  // TEST SELL AMOUNT
-  // =============================
-  // 0.0001 cbBTC (aman untuk test)
-  const sellAmountHuman = "0.0001";
-  const amountIn = ethers.parseUnits(sellAmountHuman, decimals);
+  const allowance = await cbbtc.allowance(wallet.address, ROUTER);
 
-  if (amountIn > balance) {
-    console.log("Balance not enough for test sell.");
-    return;
-  }
-
-  // =============================
-  // APPROVE
-  // =============================
-  const allowance = await cbBTC.allowance(wallet.address, SWAP_ROUTER);
-
-  if (allowance < amountIn) {
-    console.log("Approving router...");
-    const tx = await cbBTC.approve(SWAP_ROUTER, amountIn);
-    await tx.wait();
+  if (allowance < SELL_AMOUNT) {
+    console.log("Approve cbBTC...");
+    const txApprove = await cbbtc.approve(ROUTER, ethers.MaxUint256);
+    await txApprove.wait();
     console.log("Approve done");
   }
-
-  console.log("Sending TEST SELL cbBTC → WETH");
 
   const params = {
     tokenIn: CB_BTC,
     tokenOut: WETH,
-    fee: POOL_FEE,
+    fee: FEE,
     recipient: wallet.address,
     deadline: Math.floor(Date.now() / 1000) + 60 * 5,
-    amountIn: amountIn,
-    amountOutMinimum: 0n,      // TEST ONLY
+    amountIn: SELL_AMOUNT,
+    amountOutMinimum: 0n,     // test mode
     sqrtPriceLimitX96: 0
   };
 
-  try {
-    const tx = await router.exactInputSingle(params);
-    console.log("TX:", tx.hash);
+  console.log("Swap cbBTC -> WETH ...");
 
-    const receipt = await tx.wait();
-    console.log("Confirmed in block", receipt.blockNumber);
+  const tx = await router.exactInputSingle(params, {
+    gasLimit: 600000
+  });
 
-  } catch (e) {
-    console.error("SWAP FAILED:");
-    console.error(e.shortMessage || e.message);
-  }
+  console.log("TX :", tx.hash);
+
+  const rc = await tx.wait();
+  console.log("Done in block", rc.blockNumber);
 }
 
-main();
+main().catch(console.error);
