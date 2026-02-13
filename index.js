@@ -1,129 +1,73 @@
 import { ethers } from "ethers";
 
-const RPC = "https://mainnet.base.org";
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
-
-// Base addresses (fix & valid)
-const CB_BTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf";
-const USDC   = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
-const WETH   = "0x4200000000000000000000000000000000000006";
-
-// Uniswap V3 SwapRouter02 (Base)
-const ROUTER = "0x2626664c2603336E57B271c5C0b26F421741e481";
-
-// fee tiers yang masuk akal
-const FEES = [
-  [500, 500],
-  [500, 3000],
-  [3000, 3000],
+// --- CONFIG ---
+const WALLET_PRIVATE_KEY = "YOUR_PRIVATE_KEY";
+const RPC_URL = "https://base-mainnet.rpc.url";
+const ROUTER_ADDRESS = "0x2626664c2603336E57B271c5C0b26F421741e481"; // Uniswap V3 Router Base
+const TOKEN_LIST = [
+  { symbol: "cbBTC", address: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf" },
+  { symbol: "USDC", address: "0x...USDC_BASE_ADDRESS..." },
+  { symbol: "WETH", address: "0x...WETH_BASE_ADDRESS..." }
 ];
 
-const erc20Abi = [
-  "function balanceOf(address) view returns(uint256)",
-  "function decimals() view returns(uint8)",
-  "function allowance(address,address) view returns(uint256)",
-  "function approve(address,uint256) returns(bool)"
-];
+// --- PROVIDER & WALLET ---
+const provider = new ethers.JsonRpcProvider(RPC_URL);
+const wallet = new ethers.Wallet(WALLET_PRIVATE_KEY, provider);
+const router = new ethers.Contract(
+  ROUTER_ADDRESS,
+  [
+    "function getAmountsOut(uint amountIn, address[] memory path) view returns (uint[] memory amounts)",
+    "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) returns (uint[] memory amounts)"
+  ],
+  wallet
+);
 
-const routerAbi = [
-  "function exactInput((bytes path,uint256 amountIn,uint256 amountOutMinimum,address recipient,uint256 deadline)) payable returns (uint256)"
-];
-
-function encodePath(tokens, fees) {
-  let out = "0x";
-  for (let i = 0; i < fees.length; i++) {
-    out += tokens[i].slice(2);
-    out += fees[i].toString(16).padStart(6, "0");
+// --- HELPER: Check pool available ---
+async function checkPool(path, amountIn = "1000") {
+  try {
+    const amounts = await router.getAmountsOut(amountIn, path);
+    return amounts && amounts.length === path.length;
+  } catch (err) {
+    return false; // pool does not exist
   }
-  out += tokens[tokens.length - 1].slice(2);
-  return out.toLowerCase();
 }
 
-async function main() {
-  const provider = new ethers.JsonRpcProvider(RPC);
-  const wallet   = new ethers.Wallet(PRIVATE_KEY, provider);
-
-  console.log("Wallet :", wallet.address);
-  console.log("Chain  :", (await provider.getNetwork()).chainId.toString());
-
-  const cbbtc = new ethers.Contract(CB_BTC, erc20Abi, wallet);
-  const router = new ethers.Contract(ROUTER, routerAbi, wallet);
-
-  const decimals = await cbbtc.decimals();
-  const balance  = await cbbtc.balanceOf(wallet.address);
-
-  console.log("cbBTC balance :", ethers.formatUnits(balance, decimals));
-
-  if (balance === 0n) {
-    console.log("Saldo cbBTC kosong.");
+// --- MAIN SWAP FUNCTION ---
+async function swapToken(amountIn, path) {
+  const hasPool = await checkPool(path, amountIn);
+  if (!hasPool) {
+    console.log(`Pool not available for path: ${path.map(t => t).join(" → ")}`);
     return;
   }
 
-  // pakai 98% biar aman rounding / fee
-  const amountIn = balance * 98n / 100n;
-
-  const ethBal = await provider.getBalance(wallet.address);
-  console.log("ETH balance :", ethers.formatEther(ethBal));
-
-  if (ethBal < ethers.parseEther("0.00005")) {
-    console.log("ETH tidak cukup untuk gas.");
-    return;
-  }
-
-  const allowance = await cbbtc.allowance(wallet.address, ROUTER);
-  if (allowance < amountIn) {
-    console.log("Approve cbBTC ...");
-    const tx = await cbbtc.approve(ROUTER, ethers.MaxUint256);
-    await tx.wait();
-    console.log("Approve done");
-  }
-
-  const tokens = [CB_BTC, USDC, WETH];
-
-  let success = false;
-
-  for (const feePath of FEES) {
-
-    console.log("-----------------------");
-    console.log("Coba path cbBTC → USDC → WETH | fee =", feePath.join(","));
-
-    const path = encodePath(tokens, feePath);
-
-    const params = {
-      path,
+  try {
+    // Approve token if needed (simplified, add ERC20 approve logic)
+    const tx = await router.swapExactTokensForTokens(
       amountIn,
-      amountOutMinimum: 0n,
-      recipient: wallet.address,
-      deadline: Math.floor(Date.now() / 1000) + 300
-    };
-
-    try {
-
-      const tx = await router.exactInput(params, {
-        gasLimit: 500000
-      });
-
-      console.log("TX :", tx.hash);
-
-      const rc = await tx.wait();
-
-      if (rc.status === 1) {
-        console.log("SWAP BERHASIL");
-        success = true;
-        break;
-      } else {
-        console.log("TX gagal");
-      }
-
-    } catch (e) {
-      console.log("Gagal:");
-      console.log(e.shortMessage || e.message);
-    }
-  }
-
-  if (!success) {
-    console.log("Semua route cbBTC → USDC → WETH gagal.");
+      0, // accept any slippage for test
+      path,
+      wallet.address,
+      Math.floor(Date.now() / 1000) + 60 * 10 // 10 min deadline
+    );
+    console.log(`Swap TX sent: ${tx.hash}`);
+    const receipt = await tx.wait();
+    console.log("Swap success:", receipt.transactionHash);
+  } catch (err) {
+    console.error("Swap failed:", err.reason || err);
   }
 }
 
-main().catch(console.error);
+// --- EXECUTION ---
+async function main() {
+  // Contoh cbBTC → USDC → WETH
+  const path = [
+    TOKEN_LIST[0].address, // cbBTC
+    TOKEN_LIST[1].address, // USDC
+    TOKEN_LIST[2].address  // WETH
+  ];
+
+  const amountIn = ethers.parseUnits("0.001", 18); // contoh swap kecil
+  await swapToken(amountIn, path);
+}
+
+main();
