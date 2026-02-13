@@ -3,82 +3,86 @@ import dotenv from "dotenv";
 dotenv.config();
 
 /*
-  Base – Uniswap V3 swap test (ETH -> Token)
-  ONE TIME swap only
+  Base – Uniswap V3
+  WETH -> USDC -> cbBTC
+  one time test swap
 */
 
 const RPC_URL = process.env.RPC_URL;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 
-// ==================
-// CONFIG
-// ==================
-
-// Uniswap V3 SwapRouter02 on Base
+// Uniswap V3 SwapRouter02 (Base)
 const SWAP_ROUTER = "0x2626664c2603336E57B271c5C0b26F421741e481";
 
-// WETH on Base
-const WETH = "0x4200000000000000000000000000000000000006";
+// Base tokens
+const WETH  = "0x4200000000000000000000000000000000000006";
+const USDC  = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const CBBTC = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf";
 
-// Token test (CA yang kamu berikan)
-const TARGET_TOKEN = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf";
+// fee tiers
+const FEE_WETH_USDC = 500;
+const FEE_USDC_CBBTC = 500;
 
-// fee tier pool (500 = 0.05%, 3000 = 0.3%)
-const POOL_FEE = 500;
-
-// jumlah ETH untuk test buy (sesuaikan, ini ~ $1-an)
+// test amount
 const BUY_AMOUNT_ETH = "0.0005";
-
-// untuk test pertama kita set 0 agar tidak gagal karena estimasi
-const AMOUNT_OUT_MINIMUM = 0;
-
-// ==================
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 const ABI = [
-  "function exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)"
+  "function exactInput((bytes path,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum)) payable returns (uint256 amountOut)"
 ];
 
 const router = new ethers.Contract(SWAP_ROUTER, ABI, wallet);
 
+function encodePath(tokens, fees) {
+  let path = "0x";
+  for (let i = 0; i < fees.length; i++) {
+    path += tokens[i].slice(2);
+    path += fees[i].toString(16).padStart(6, "0");
+  }
+  path += tokens[tokens.length - 1].slice(2);
+  return path.toLowerCase();
+}
+
 async function main() {
 
-  const network = await provider.getNetwork();
-  console.log("Chain:", Number(network.chainId));
+  const net = await provider.getNetwork();
+  console.log("Chain:", Number(net.chainId));
   console.log("Wallet:", wallet.address);
 
-  const balance = await provider.getBalance(wallet.address);
-  console.log("ETH balance:", ethers.formatEther(balance));
+  const bal = await provider.getBalance(wallet.address);
+  console.log("ETH balance:", ethers.formatEther(bal));
 
   const amountIn = ethers.parseEther(BUY_AMOUNT_ETH);
 
+  const path = encodePath(
+    [WETH, USDC, CBBTC],
+    [FEE_WETH_USDC, FEE_USDC_CBBTC]
+  );
+
   const params = {
-    tokenIn: WETH,
-    tokenOut: TARGET_TOKEN,
-    fee: POOL_FEE,
+    path: path,
     recipient: wallet.address,
-    deadline: Math.floor(Date.now() / 1000) + 60 * 5,
+    deadline: Math.floor(Date.now() / 1000) + 300,
     amountIn: amountIn,
-    amountOutMinimum: AMOUNT_OUT_MINIMUM,
-    sqrtPriceLimitX96: 0
+    amountOutMinimum: 0
   };
 
-  console.log("Sending swap tx...");
+  console.log("Sending swap (WETH -> USDC -> cbBTC)...");
 
-  const tx = await router.exactInputSingle(
+  const tx = await router.exactInput(
     params,
     { value: amountIn }
   );
 
-  console.log("TX sent:", tx.hash);
+  console.log("TX:", tx.hash);
 
   const receipt = await tx.wait();
   console.log("✅ Swap success");
   console.log("Block:", receipt.blockNumber);
 }
 
-main().catch((e) => {
+main().catch(e => {
   console.error("ERROR:", e);
 });
